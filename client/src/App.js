@@ -24,6 +24,9 @@ function App() {
 
   const API_BASE_URL = process.env.NODE_ENV === 'production' ? '/api' : 'http://localhost:5000/api';
 
+  // Configure axios to send credentials for session management
+  axios.defaults.withCredentials = true;
+
   // Check SSH status on component mount
   useEffect(() => {
     checkSshStatus();
