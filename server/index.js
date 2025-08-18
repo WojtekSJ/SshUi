@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const { Client } = require('ssh2');
+const session = require('express-session');
 require('dotenv').config();
 
 const app = express();
@@ -17,17 +18,39 @@ const sshConfig = {
   port: 22
 };
 
-// Store password in memory (in production, consider using a more secure method)
-let sshPassword = null;
+// Store user passwords in memory (session-based)
+const userPasswords = new Map();
+
+// Session configuration
+app.use(session({
+  secret: process.env.SESSION_SECRET || 'your-secret-key-change-in-production',
+  resave: false,
+  saveUninitialized: false,
+  cookie: { 
+    secure: false, // Set to false for HTTP, set to true only if using HTTPS
+    maxAge: 24 * 60 * 60 * 1000 // 24 hours
+  }
+}));
 
 // Middleware
-app.use(cors());
+app.use(cors({
+  origin: true, // Allow all origins for debugging
+  credentials: true
+}));
 app.use(express.json());
 
 // Serve static files from the React app in production
 if (process.env.NODE_ENV === 'production') {
   app.use(express.static(path.join(__dirname, '../client/build')));
 }
+
+// Middleware to ensure user has a session ID
+app.use((req, res, next) => {
+  if (!req.session.userId) {
+    req.session.userId = req.sessionID;
+  }
+  next();
+});
 
 // Function to add log entry
 function addLog(level, message, data = null) {
@@ -47,9 +70,25 @@ function addLog(level, message, data = null) {
   console.log(`[${level.toUpperCase()}] ${message}`, data || '');
 }
 
+// Helper function to get user's password
+function getUserPassword(userId) {
+  return userPasswords.get(userId);
+}
+
+// Helper function to set user's password
+function setUserPassword(userId, password) {
+  userPasswords.set(userId, password);
+}
+
+// Helper function to clear user's password
+function clearUserPassword(userId) {
+  userPasswords.delete(userId);
+}
+
 // Helper function to execute SSH command with timeout and logging
-function executeSSHCommand(command, timeout = 30000) {
+function executeSSHCommand(command, userId, timeout = 360000) {
   return new Promise((resolve, reject) => {
+    const sshPassword = getUserPassword(userId);
     if (!sshPassword) {
       reject(new Error('SSH password not configured. Please set password first.'));
       return;
@@ -110,8 +149,9 @@ function executeSSHCommand(command, timeout = 30000) {
 }
 
 // Helper function to execute interactive command (like ollama run)
-function executeInteractiveCommand(command, input = '', timeout = 10000) {
+function executeInteractiveCommand(command, userId, input = '', timeout = 360000) {
   return new Promise((resolve, reject) => {
+    const sshPassword = getUserPassword(userId);
     if (!sshPassword) {
       reject(new Error('SSH password not configured. Please set password first.'));
       return;
@@ -187,10 +227,24 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'Server is running' });
 });
 
+// Debug endpoint to check session
+app.get('/api/debug-session', (req, res) => {
+  res.json({
+    sessionId: req.sessionID,
+    userId: req.session.userId,
+    hasPassword: getUserPassword(req.session.userId) !== undefined,
+    totalUsers: userPasswords.size
+  });
+});
+
 // Set SSH password
 app.post('/api/set-password', (req, res) => {
   try {
     const { password } = req.body;
+    const userId = req.session.userId;
+    
+    console.log('Setting password for user:', userId);
+    console.log('Session ID:', req.sessionID);
     
     if (!password) {
       return res.status(400).json({
@@ -199,12 +253,13 @@ app.post('/api/set-password', (req, res) => {
       });
     }
 
-    sshPassword = password;
-    addLog('info', `SSH password set for ${sshConfig.username}@${sshConfig.host}`);
+    setUserPassword(userId, password);
+    addLog('info', `SSH password set for user ${userId} (${sshConfig.username}@${sshConfig.host})`);
     
     res.json({
       success: true,
-      message: 'SSH password set successfully'
+      message: 'SSH password set successfully',
+      userId: userId
     });
   } catch (error) {
     addLog('error', `Error setting password: ${error.message}`);
@@ -217,19 +272,28 @@ app.post('/api/set-password', (req, res) => {
 
 // Get current SSH configuration status (without exposing password)
 app.get('/api/ssh-status', (req, res) => {
+  const userId = req.session.userId;
+  const hasPassword = getUserPassword(userId) !== undefined;
+  
+  console.log('Checking SSH status for user:', userId);
+  console.log('Session ID:', req.sessionID);
+  console.log('Has password:', hasPassword);
+  
   res.json({
     success: true,
-    configured: sshPassword !== null,
+    configured: hasPassword,
     host: sshConfig.host,
     username: sshConfig.username,
-    port: sshConfig.port
+    port: sshConfig.port,
+    userId: userId
   });
 });
 
 // Clear SSH password
 app.post('/api/clear-password', (req, res) => {
-  sshPassword = null;
-  addLog('info', 'SSH password cleared');
+  const userId = req.session.userId;
+  clearUserPassword(userId);
+  addLog('info', `SSH password cleared for user ${userId}`);
   res.json({
     success: true,
     message: 'SSH password cleared successfully'
@@ -239,6 +303,9 @@ app.post('/api/clear-password', (req, res) => {
 // Get available models
 app.get('/api/models', async (req, res) => {
   try {
+    const userId = req.session.userId;
+    const sshPassword = getUserPassword(userId);
+    
     if (!sshPassword) {
       return res.status(400).json({
         success: false,
@@ -246,7 +313,7 @@ app.get('/api/models', async (req, res) => {
       });
     }
 
-    const result = await executeSSHCommand('ollama ls');
+    const result = await executeSSHCommand('ollama ls', userId, 60000);
     
     // Parse the ollama ls output to extract model details
     const modelLines = result.split('\n').filter(line => line.trim());
@@ -270,7 +337,7 @@ app.get('/api/models', async (req, res) => {
       .filter(model => model !== null)
       .sort((a, b) => a.name.localeCompare(b.name)); // Sort alphabetically
     
-    addLog('info', `Fetched ${models.length} models`);
+    addLog('info', `Fetched ${models.length} models for user ${userId}`);
     
     res.json({ 
       success: true, 
@@ -289,6 +356,9 @@ app.get('/api/models', async (req, res) => {
 // Run a specific model
 app.post('/api/run-model', async (req, res) => {
   try {
+    const userId = req.session.userId;
+    const sshPassword = getUserPassword(userId);
+    
     if (!sshPassword) {
       return res.status(400).json({
         success: false,
@@ -305,14 +375,14 @@ app.post('/api/run-model', async (req, res) => {
       });
     }
     
-    addLog('info', `Running model: ${modelName} with prompt: "${prompt}"`);
+    addLog('info', `Running model: ${modelName} with prompt: "${prompt}" for user ${userId}`);
     
     // Escape the prompt for shell safety
     const escapedPrompt = prompt.replace(/'/g, "'\"'\"'");
     
     // Use echo to provide input and pipe to ollama run to avoid interactive mode
     const command = `echo '${escapedPrompt}' | ollama run ${modelName}`;
-    const result = await executeSSHCommand(command, 30000); // 30 second timeout
+    const result = await executeSSHCommand(command, userId, 360000); 
     
     res.json({ 
       success: true, 
@@ -332,6 +402,9 @@ app.post('/api/run-model', async (req, res) => {
 // Test SSH connection
 app.post('/api/test-connection', async (req, res) => {
   try {
+    const userId = req.session.userId;
+    const sshPassword = getUserPassword(userId);
+    
     if (!sshPassword) {
       return res.status(400).json({
         success: false,
@@ -339,9 +412,9 @@ app.post('/api/test-connection', async (req, res) => {
       });
     }
 
-    addLog('info', 'Testing SSH connection');
-    const result = await executeSSHCommand('echo "SSH connection successful"');
-    addLog('success', 'SSH connection test successful');
+    addLog('info', `Testing SSH connection for user ${userId}`);
+    const result = await executeSSHCommand('echo "SSH connection successful"', userId);
+    addLog('success', `SSH connection test successful for user ${userId}`);
     res.json({ 
       success: true, 
       message: 'SSH connection successful',
@@ -386,4 +459,5 @@ app.listen(PORT, () => {
   console.log(`SSH configured for: ${sshConfig.username}@${sshConfig.host}:${sshConfig.port}`);
   console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
   console.log('SSH password must be set via API before use');
+  console.log('User session management enabled - each user has their own password storage');
 }); 
