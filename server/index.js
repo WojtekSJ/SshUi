@@ -86,7 +86,7 @@ function clearUserPassword(userId) {
 }
 
 // Helper function to execute SSH command with timeout and logging
-function executeSSHCommand(command, userId, timeout = 30000) {
+function executeSSHCommand(command, userId, timeout = 360000) {
   return new Promise((resolve, reject) => {
     const sshPassword = getUserPassword(userId);
     if (!sshPassword) {
@@ -149,7 +149,7 @@ function executeSSHCommand(command, userId, timeout = 30000) {
 }
 
 // Helper function to execute interactive command (like ollama run)
-function executeInteractiveCommand(command, userId, input = '', timeout = 10000) {
+function executeInteractiveCommand(command, userId, input = '', timeout = 360000) {
   return new Promise((resolve, reject) => {
     const sshPassword = getUserPassword(userId);
     if (!sshPassword) {
@@ -313,7 +313,7 @@ app.get('/api/models', async (req, res) => {
       });
     }
 
-    const result = await executeSSHCommand('ollama ls', userId);
+    const result = await executeSSHCommand('ollama ls', userId, 60000);
     
     // Parse the ollama ls output to extract model details
     const modelLines = result.split('\n').filter(line => line.trim());
@@ -382,7 +382,7 @@ app.post('/api/run-model', async (req, res) => {
     
     // Use echo to provide input and pipe to ollama run to avoid interactive mode
     const command = `echo '${escapedPrompt}' | ollama run ${modelName}`;
-    const result = await executeSSHCommand(command, userId, 30000); // 30 second timeout
+    const result = await executeSSHCommand(command, userId, 360000); 
     
     res.json({ 
       success: true, 
